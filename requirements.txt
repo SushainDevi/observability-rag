@@ -1,0 +1,13 @@
+# Core Dependencies
+duckdb==0.10.0
+langchain-core==0.2.0
+langchain-community==0.2.0
+gradio==4.28.0
+ollama==0.2.0
+pandas==2.2.1
+python-dotenv==1.0.1
+
+# Development Extras
+ipython==8.22.0
+black==24.3.0
+pytest==8.0.2
