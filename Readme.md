@@ -34,14 +34,9 @@ python db_setup.py
 
 ### **3. Launch Interface**  
 
-#### **Option A: Web UI (Recommended)**  
-```bash
-python web_ui.py
-```
-➡️ **Access at:** [http://localhost:7860](http://localhost:7860) *(Ctrl+C to stop)*  
 
  
-#### **Option B: CLI**  
+####  CLI**  
 ```bash
 python cli.py
 ```
@@ -77,14 +72,6 @@ flowchart LR
 
 ---
 
-## **⚙️ Configuration**  
-
-| File | Purpose | Customization |
-|------|---------|---------------|
-| `config.py` | Model parameters | Change LLM/temperature |
-| `data_generator.py` | Sample data | Adjust server count/metrics |
-| `db_setup.py` | DB schema | Modify indexes/views |
-
 **Pro Tip:** For GPU acceleration:  
 ```python
 # In rag_core.py
@@ -103,7 +90,6 @@ observability-rag/
 ├── db_setup.py
 ├── rag_core.py
 ├── cli.py
-├── web_ui.py
 ├── requirements.txt
 └── README.md
 

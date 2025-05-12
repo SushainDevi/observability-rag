@@ -1,107 +1,111 @@
 import duckdb
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_community.chat_models import ChatOllama
+import json
+from transformers import pipeline, AutoModel, AutoTokenizer
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from pydantic import BaseModel
+
+class QueryIntent(BaseModel):
+    metric: str
+    threshold: float
+    timeframe: str
+    servers: list[str]
 
 class ObservabilityAssistant:
     def __init__(self):
-        # Initialize DuckDB connection
+        # Initialize components
         self.conn = duckdb.connect('observability.db')
-        
-        # Initialize Llama3 via Ollama
-        self.llm = ChatOllama(
-            model="llama3.2:1b",
-            temperature=0.3,  # More deterministic outputs
-            num_ctx=4096,     # Larger context window
-            top_k=40          # Better for factual queries
+        self.embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+        self.intent_classifier = pipeline(
+            "text-classification", 
+            model="typeform/distilbert-base-uncased-mnli"
         )
+        self.vector_store = self._init_vector_store()
         
-        # Modify the SQL prompt template
-        self.sql_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert at converting observability queries to DuckDB SQL.
-            Database Schema:
-            Table: telemetry
-            - server_id (TEXT): Server identifier (use this instead of 'host')
-            - metric_name (TEXT): 'cpu', 'memory', or 'disk'
-            - metric_value (FLOAT): Percentage value (0-100)
-            - timestamp (TIMESTAMP)
-            
-            Conversion Rules:
-            1. Always use 'server_id' column for server identification
-            2. For time ranges, use: timestamp >= NOW() - INTERVAL 'X hours'
-            3. Handle percentages as direct comparisons (65% = 65.0)
-            
-            Example Conversions:
-            User: List hosts with disk >90% today
-            SQL: SELECT DISTINCT server_id FROM telemetry 
-                  WHERE metric_name = 'disk' 
-                  AND metric_value > 90.0 
-                  AND timestamp >= date_trunc('day', NOW())
-            
-            User: Show servers with CPU spikes last hour
-            SQL: SELECT server_id FROM telemetry 
-                  WHERE metric_name = 'cpu' 
-                  AND metric_value > 80.0 
-                  AND timestamp >= NOW() - INTERVAL '1 hour'
-            
-            Respond ONLY with valid SQL."""),
-            ("human", "{query}")
-        ])
+        # Quantized model for SQL generation
+        self.sql_model = AutoModel.from_pretrained(
+            "tscholak/codegen-sql-350m-multi",
+            device_map="auto",
+            load_in_4bit=True
+        )
+        self.sql_tokenizer = AutoTokenizer.from_pretrained("tscholak/codegen-sql-350m-multi")
+
+    def _init_vector_store(self):
+        # Initialize with sample query patterns
+        example_queries = [
+            "cpu usage over 80% last hour",
+            "memory consumption above 90% today",
+            "disk space exceeding 85% past 24 hours"
+        ]
+        return FAISS.from_texts(example_queries, self.embedder)
+
+    def _parse_intent(self, query: str) -> QueryIntent:
+        # Structured output using model
+        template = """Extract:
+        { "metric": "cpu|memory|disk", 
+        "threshold": number,
+        "timeframe": "duration", 
+        "servers": [] }"""
         
-        # Improved response template
-        self.response_prompt = ChatPromptTemplate.from_messages([
-            ("system", """Transform SQL results into professional observability alerts.
-            Rules:
-            - Highlight critical values (>90%) with ❗
-            - Format timestamps clearly
-            - Summarize when >5 results
-            
-            Query: {query}
-            Results: {results}
-            
-            Example:
-            "3 servers exceeded memory thresholds:
-            • server_01 (92% ❗ at 14:30)
-            • server_02 (87% at 15:10)"
-            """),
-            ("human", "Generate concise report:")
-        ])
+        result = self.intent_classifier(query, candidate_labels=["cpu", "memory", "disk"])
+        return QueryIntent(
+            metric=result["labels"][0],
+            threshold=self._extract_threshold(query),
+            timeframe=self._extract_timeframe(query),
+            servers=[]
+        )
 
-    def generate_sql(self, query):
-        chain = self.sql_prompt | self.llm
-        return chain.invoke({"query": query}).content.strip()
+    def _retrieve_similar_queries(self, query: str, k=3) -> list:
+        return self.vector_store.similarity_search(query, k=k)
 
-    def execute_query(self, sql):
+    def generate_sql(self, query: str) -> str:
+        # Retrieve contextual examples
+        examples = [doc.page_content for doc in self._retrieve_similar_queries(query)]
+        
+        # Generate SQL using fine-tuned model
+        inputs = self.sql_tokenizer.encode(
+            f"Query: {query}\nExamples: {examples}\nSQL:",
+            return_tensors="pt"
+        )
+        outputs = self.sql_model.generate(inputs, max_length=200)
+        return self.sql_tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    def _validate_sql(self, sql: str) -> bool:
         try:
-            result = self.conn.execute(sql)
-            if result is None:
-                return "No results found"
-            return result.df()
-        except Exception as e:
-            print(f"SQL Error: {str(e)}")  # Log full error
-            return f"SQL Error: Please rephrase your query. Common issues:\n- Use 'server' instead of 'host'\n- Check time range formatting\n- Verify metric names (cpu/memory/disk)"
+            self.conn.execute(f"EXPLAIN {sql}")
+            return True
+        except:
+            return False
 
-    def generate_response(self, query, results):
-        if isinstance(results, str) and "SQL Error" in results:
-            return f"❌ **Validation Error**\n{results}"
-        
-        # Convert DataFrame to readable string
-        results_str = results.to_markdown(index=False) if hasattr(results, 'to_markdown') else str(results)
-        
-        chain = self.response_prompt | self.llm
-        return chain.invoke({
-            "query": query,
-            "results": results_str
-        }).content
+    def execute_query(self, sql: str):
+        if not self._validate_sql(sql):
+            raise ValueError("Invalid SQL query")
+        return self.conn.execute(sql).df()
 
-    def process_query(self, query):
+    def generate_response(self, results) -> str:
+        # Structured templating instead of LLM formatting
+        if not isinstance(results, pd.DataFrame):
+            return results
+        
+        response = ["Analysis Results:"]
+        for _, row in results.iterrows():
+            alert = "❗" if row['metric_value'] > 90 else ""
+            response.append(
+                f"{row['server_id']}: {row['metric_value']}% {alert}"
+            )
+        return "\n".join(response)
+
+    def process_query(self, query: str):
         try:
-            print(f"\nProcessing: {query}")
+            # Structured intent parsing
+            intent = self._parse_intent(query)
+            
+            # SQL generation with model + context
             sql = self.generate_sql(query)
-            print(f"Generated SQL:\n{sql}")
             
+            # Execute and format
             results = self.execute_query(sql)
-            response = self.generate_response(query, results)
+            return self.generate_response(results)
             
-            return f"\n🔍 Results:\n{response}"
         except Exception as e:
-            return f"\n⚠️ Error: {str(e)}"
+            return f"Error: {str(e)}"
