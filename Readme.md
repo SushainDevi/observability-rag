@@ -80,18 +80,31 @@ ChatOllama(model="mistral", num_gpu=1)
 ---
 
 ### File Structure
-observability-rag/
+observability-rag
+/
+
 ├── docs/
+
 │ ├── CLI_demo.mp4
+
 │ ├── UI_demo.mp4
+
 │ ├── cli_thumbnail.png
+
 │ └── ui_thumbnail.png
+
 ├── data_generator.py
+
 ├── db_setup.py
+
 ├── rag_core.py
+
 ├── cli.py
+
 ├── requirements.txt
+
 └── README.md
+
 
 ---
 
